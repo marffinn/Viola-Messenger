@@ -1,0 +1,6 @@
+{
+  "name": "Local Messenger",
+  "description": "An end-to-end encrypted decentralized local network messenger.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
