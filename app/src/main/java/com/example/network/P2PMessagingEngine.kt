@@ -35,14 +35,14 @@ class P2PMessagingEngine(
     // Custom single-thread executor dispatcher to guarantee in-order delivery
     private val networkDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
 
-    fun startServer() {
+    fun startServer(port: Int = SECURE_PORT) {
         if (isRunning) return
         isRunning = true
         listenJob = scope.launch(Dispatchers.IO) {
             try {
-                serverSocket = ServerSocket(SECURE_PORT)
+                serverSocket = ServerSocket(port)
                 listener.onServerStatusChanged(true)
-                Log.d(TAG, "Sync server started on port $SECURE_PORT")
+                Log.d(TAG, "Sync server started on port $port")
 
                 while (isRunning) {
                     val client = serverSocket?.accept() ?: break
@@ -80,34 +80,42 @@ class P2PMessagingEngine(
                 if (line != null) {
                     val json = JSONObject(line)
                     val event = json.optString("event")
-                    Log.d(TAG, "Received network event: $event from ${socket.inetAddress.hostAddress}")
+                    val remoteIp = socket.inetAddress?.hostAddress ?: ""
+                    val senderPort = json.optInt("senderPort", SECURE_PORT)
+                    val peerIp = if (senderPort != SECURE_PORT) "$remoteIp:$senderPort" else remoteIp
+                    
+                    Log.d(TAG, "Received network event: $event from $peerIp")
 
                     withContext(Dispatchers.Main) {
                         when (event) {
                             "handshake" -> {
                                 val senderName = json.getString("senderName")
-                                val senderIp = json.getString("senderIp")
                                 val publicKey = json.getString("publicKey")
-                                listener.onPeerConnected(senderIp, senderName, publicKey)
+                                val senderAvatar = json.optString("senderAvatar", "👤")
+                                listener.onPeerConnected(peerIp, senderName, publicKey, senderAvatar)
                             }
                             "message" -> {
-                                val senderIp = json.getString("senderIp")
                                 val senderName = json.getString("senderName")
                                 val encryptedData = json.getString("encryptedData")
                                 val encryptedAesKey = json.getString("encryptedAesKey")
                                 val iv = json.getString("iv")
+                                val fileType = json.optString("fileType").takeIf { it.isNotBlank() }
+                                val fileName = json.optString("fileName").takeIf { it.isNotBlank() }
+                                val fileSize = json.optLong("fileSize", 0L)
                                 listener.onMessageReceived(
-                                    peerIp = senderIp,
+                                    peerIp = peerIp,
                                     senderName = senderName,
                                     encryptedData = encryptedData,
                                     encryptedAesKey = encryptedAesKey,
-                                    iv = iv
+                                    iv = iv,
+                                    fileType = fileType,
+                                    fileName = fileName,
+                                    fileSize = fileSize
                                 )
                             }
                             "typing" -> {
-                                val senderIp = json.getString("senderIp")
                                 val isTyping = json.getBoolean("isTyping")
-                                listener.onTypingStateChanged(senderIp, isTyping)
+                                listener.onTypingStateChanged(peerIp, isTyping)
                             }
                             "ping" -> {
                                 // Simple ping response could be handled or logged
@@ -132,7 +140,21 @@ class P2PMessagingEngine(
             var socket: Socket? = null
             try {
                 socket = Socket()
-                socket.connect(InetSocketAddress(peerIp, SECURE_PORT), TIMEOUT_MS)
+                val colonIndex = peerIp.lastIndexOf(':')
+                val (host, port) = if (colonIndex != -1) {
+                    val portStr = peerIp.substring(colonIndex + 1)
+                    val parsedPort = portStr.toIntOrNull()
+                    if (parsedPort != null && (peerIp.count { it == ':' } == 1 || peerIp.contains(']'))) {
+                        Pair(peerIp.substring(0, colonIndex).removePrefix("[").removeSuffix("]"), parsedPort)
+                    } else if (parsedPort != null && peerIp.count { it == ':' } > 1 && parsedPort > 1024) {
+                        Pair(peerIp.substring(0, colonIndex), parsedPort)
+                    } else {
+                        Pair(peerIp, SECURE_PORT)
+                    }
+                } else {
+                    Pair(peerIp, SECURE_PORT)
+                }
+                socket.connect(InetSocketAddress(host, port), TIMEOUT_MS)
                 val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), "UTF-8"))
                 writer.write(json.toString())
                 writer.newLine()
@@ -159,13 +181,16 @@ class P2PMessagingEngine(
     }
 
     interface P2PListener {
-        fun onPeerConnected(ip: String, name: String, publicKey: String)
+        fun onPeerConnected(ip: String, name: String, publicKey: String, avatar: String)
         fun onMessageReceived(
             peerIp: String,
             senderName: String,
             encryptedData: String,
             encryptedAesKey: String,
-            iv: String
+            iv: String,
+            fileType: String?,
+            fileName: String?,
+            fileSize: Long
         )
         fun onTypingStateChanged(peerIp: String, isTyping: Boolean)
         fun onServerStatusChanged(isListening: Boolean)

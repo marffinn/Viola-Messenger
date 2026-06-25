@@ -40,7 +40,7 @@ interface ChatMessageDao {
     suspend fun clearChatForPeer(peerIp: String)
 }
 
-@Database(entities = [Peer::class, ChatMessage::class], version = 1, exportSchema = false)
+@Database(entities = [Peer::class, ChatMessage::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun peerDao(): PeerDao
     abstract fun chatMessageDao(): ChatMessageDao

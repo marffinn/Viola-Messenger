@@ -9,5 +9,6 @@ data class Peer(
     val alias: String,
     val publicKey: String,
     val lastSeen: Long = System.currentTimeMillis(),
-    val isOnline: Boolean = false
+    val isOnline: Boolean = false,
+    val avatar: String = "👤"
 )

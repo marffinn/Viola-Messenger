@@ -15,5 +15,9 @@ data class ChatMessage(
     val iv: String,
     val timestamp: Long = System.currentTimeMillis(),
     val isFromMe: Boolean,
-    val isSecure: Boolean = true
+    val isSecure: Boolean = true,
+    val fileType: String? = null,
+    val fileName: String? = null,
+    val localFilePath: String? = null,
+    val fileSize: Long = 0L
 )

@@ -35,10 +35,14 @@ import java.net.Socket
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.util.Collections
+import java.io.File
+import android.net.Uri
 
 data class MessengerUiState(
     val ownName: String = "",
     val ownIp: String = "127.0.0.1",
+    val ownPort: Int = 12120,
+    val ownAvatar: String = "👤",
     val ownFingerprint: String = "",
     val activeChatPeerIp: String? = null,
     val peers: List<Peer> = emptyList(),
@@ -57,7 +61,7 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
     private val db = Room.databaseBuilder(
         application.applicationContext,
         AppDatabase::class.java, "local_crypt_db"
-    ).build()
+    ).fallbackToDestructiveMigration().build()
     
     val repository = ChatRepository(db.peerDao(), db.chatMessageDao())
 
@@ -120,11 +124,14 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
         }
 
         val fingerprint = pubKeyStr?.let { EncryptionManager.getFingerprint(it) } ?: "Unknown"
+        val avatar = sharedPrefs.getString("own_avatar", "👤") ?: "👤"
 
         _uiState.update {
             it.copy(
                 ownName = name ?: "SecureNode",
-                ownFingerprint = fingerprint
+                ownFingerprint = fingerprint,
+                ownPort = sharedPrefs.getInt("listening_port", P2PMessagingEngine.SECURE_PORT),
+                ownAvatar = avatar
             )
         }
     }
@@ -142,6 +149,29 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun updateOwnAvatar(newAvatar: String) {
+        if (newAvatar.isBlank()) return
+        sharedPrefs.edit().putString("own_avatar", newAvatar).apply()
+        _uiState.update { it.copy(ownAvatar = newAvatar) }
+        
+        // Broadcast identity update to all online peers!
+        viewModelScope.launch(Dispatchers.IO) {
+            uiState.value.peers.filter { it.isOnline }.forEach { peer ->
+                sendHandshakeToPeer(peer.ip)
+            }
+        }
+    }
+
+    fun updateOwnPort(newPort: Int) {
+        if (newPort !in 1024..65535) return
+        sharedPrefs.edit().putInt("listening_port", newPort).apply()
+        _uiState.update { it.copy(ownPort = newPort) }
+        
+        // Restart server with new port
+        p2pEngine.stopServer()
+        p2pEngine.startServer(newPort)
+    }
+
     fun resolveLocalIp() {
         viewModelScope.launch(Dispatchers.IO) {
             val ip = getLocalIpAddress() ?: "127.0.0.1"
@@ -152,7 +182,8 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun startReceiverServer() {
-        p2pEngine.startServer()
+        val port = sharedPrefs.getInt("listening_port", P2PMessagingEngine.SECURE_PORT)
+        p2pEngine.startServer(port)
     }
 
     private fun observePeers() {
@@ -244,6 +275,7 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
                 val payload = JSONObject().apply {
                     put("event", "message")
                     put("senderIp", uiState.value.ownIp)
+                    put("senderPort", uiState.value.ownPort)
                     put("senderName", uiState.value.ownName)
                     put("encryptedData", aesResult.encryptedDataBase64)
                     put("encryptedAesKey", encAesKeyStr)
@@ -284,6 +316,92 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun sendFileOrImage(uri: Uri, fileName: String, fileType: String, fileSize: Long) {
+        val recipientIp = uiState.value.activeChatPeerIp ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val context = getApplication<Application>().applicationContext
+                val inputStream = context.contentResolver.openInputStream(uri) ?: return@launch
+                val bytes = inputStream.readBytes()
+                inputStream.close()
+                
+                val base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP)
+                
+                val recipient = repository.getPeerByIp(recipientIp) ?: return@launch
+                if (recipient.publicKey.isBlank()) {
+                    withContext(Dispatchers.Main) {
+                        _uiState.update { it.copy(errorMessage = "Recipient Public Key unavailable. Initiate a Handshake first!") }
+                    }
+                    return@launch
+                }
+                
+                // 1. Generate random session AES key
+                val sessionAesKey = EncryptionManager.generateSessionAesKey()
+                
+                // 2. Encrypt Base64 data with AES key
+                val aesResult = EncryptionManager.encryptWithAes(base64Data, sessionAesKey)
+                
+                // 3. Encrypt AES key using recipient's RSA Public Key
+                val recipientPubKey = EncryptionManager.stringToPublicKey(recipient.publicKey)
+                val encAesKeyStr = EncryptionManager.encryptAesKeyWithRsa(sessionAesKey, recipientPubKey)
+                
+                // 4. Build message payload JSON
+                val payload = JSONObject().apply {
+                    put("event", "message")
+                    put("senderIp", uiState.value.ownIp)
+                    put("senderPort", uiState.value.ownPort)
+                    put("senderName", uiState.value.ownName)
+                    put("encryptedData", aesResult.encryptedDataBase64)
+                    put("encryptedAesKey", encAesKeyStr)
+                    put("iv", aesResult.ivBase64)
+                    put("fileType", fileType)
+                    put("fileName", fileName)
+                    put("fileSize", fileSize)
+                }
+                
+                // 5. Save locally in Cache/Files so we can display it instantly!
+                val localDir = File(context.filesDir, "received_files")
+                if (!localDir.exists()) localDir.mkdirs()
+                val localFile = File(localDir, "${System.currentTimeMillis()}_$fileName")
+                localFile.writeBytes(bytes)
+                
+                // 6. Transmit
+                val success = p2pEngine.transmitEvent(recipientIp, payload)
+                
+                // 7. Save in local database
+                val chatMessage = ChatMessage(
+                    peerIp = recipientIp,
+                    senderName = uiState.value.ownName,
+                    senderIp = uiState.value.ownIp,
+                    messageText = "[Attachment: $fileName]", // fallback text
+                    encryptedData = aesResult.encryptedDataBase64,
+                    encryptedAesKey = encAesKeyStr,
+                    iv = aesResult.ivBase64,
+                    isFromMe = true,
+                    fileType = fileType,
+                    fileName = fileName,
+                    localFilePath = localFile.absolutePath,
+                    fileSize = fileSize
+                )
+                repository.insertMessage(chatMessage)
+                
+                if (success) {
+                    repository.updateOnlineStatus(recipientIp, true)
+                } else {
+                    repository.updateOnlineStatus(recipientIp, false)
+                    withContext(Dispatchers.Main) {
+                        _uiState.update { it.copy(errorMessage = "File saved locally but delivery failed. Recipient is offline.") }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MessengerViewModel", "Failed to send file", e)
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(errorMessage = "Failed to send file: ${e.localizedMessage}") }
+                }
+            }
+        }
+    }
+
     // Sends a typing notification to current participant
     fun sendTypingState(isTyping: Boolean) {
         val recipientIp = uiState.value.activeChatPeerIp ?: return
@@ -292,6 +410,7 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
             val payload = JSONObject().apply {
                 put("event", "typing")
                 put("senderIp", uiState.value.ownIp)
+                put("senderPort", uiState.value.ownPort)
                 put("isTyping", isTyping)
             }
             p2pEngine.transmitEvent(recipientIp, payload)
@@ -355,7 +474,9 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
         val payload = JSONObject().apply {
             put("event", "handshake")
             put("senderIp", uiState.value.ownIp)
+            put("senderPort", uiState.value.ownPort)
             put("senderName", uiState.value.ownName)
+            put("senderAvatar", uiState.value.ownAvatar)
             put("publicKey", myPubKeyStr)
         }
         return p2pEngine.transmitEvent(peerIp, payload)
@@ -378,32 +499,52 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
         return null
     }
 
+    private suspend fun findMatchingPeer(peerIp: String): Peer? {
+        val exact = repository.getPeerByIp(peerIp)
+        if (exact != null) return exact
+
+        if (peerIp.contains(":")) {
+            val baseIp = peerIp.substringBefore(":")
+            val baseMatch = repository.getPeerByIp(baseIp)
+            if (baseMatch != null) return baseMatch
+        } else {
+            val matchWithPort = uiState.value.peers.find { 
+                it.ip.substringBefore(":") == peerIp 
+            }
+            if (matchWithPort != null) return matchWithPort
+        }
+        return null
+    }
+
     // --- P2PMessagingEngine.P2PListener implementations ---
 
-    override fun onPeerConnected(ip: String, name: String, publicKey: String) {
+    override fun onPeerConnected(ip: String, name: String, publicKey: String, avatar: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val existing = repository.getPeerByIp(ip)
+            val existing = findMatchingPeer(ip)
+            val ipToUse = existing?.ip ?: ip
             val updatedPeer = if (existing != null) {
                 existing.copy(
                     alias = name,
                     publicKey = publicKey.ifBlank { existing.publicKey },
                     isOnline = true,
-                    lastSeen = System.currentTimeMillis()
+                    lastSeen = System.currentTimeMillis(),
+                    avatar = avatar
                 )
             } else {
                 Peer(
-                    ip = ip,
+                    ip = ipToUse,
                     alias = name,
                     publicKey = publicKey,
                     isOnline = true,
-                    lastSeen = System.currentTimeMillis()
+                    lastSeen = System.currentTimeMillis(),
+                    avatar = avatar
                 )
             }
             repository.insertPeer(updatedPeer)
 
             // If we didn't have their public key or they are new, reply with our own Handshake so handshake is mutual!
             if (existing == null || existing.publicKey.isBlank()) {
-                sendHandshakeToPeer(ip)
+                sendHandshakeToPeer(ipToUse)
             }
         }
     }
@@ -413,28 +554,32 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
         senderName: String,
         encryptedData: String,
         encryptedAesKey: String,
-        iv: String
+        iv: String,
+        fileType: String?,
+        fileName: String?,
+        fileSize: Long
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // Make sure peer is created/updated in DB
-                var peer = repository.getPeerByIp(peerIp)
+                val existing = findMatchingPeer(peerIp)
+                val ipToUse = existing?.ip ?: peerIp
+                var peer = existing
                 if (peer == null) {
                     peer = Peer(
-                        ip = peerIp,
+                        ip = ipToUse,
                         alias = senderName,
                         publicKey = "", // Handshake flow will replenish this
                         isOnline = true,
                         lastSeen = System.currentTimeMillis()
                     )
                     repository.insertPeer(peer)
-                    sendHandshakeToPeer(peerIp) // request identity
+                    sendHandshakeToPeer(ipToUse) // request identity
                 } else {
-                    repository.updateOnlineStatus(peerIp, true)
+                    repository.updateOnlineStatus(ipToUse, true)
                 }
 
                 _uiState.update { state ->
-                    if (state.activeChatPeerIp == peerIp) {
+                    if (state.activeChatPeerIp == ipToUse) {
                         state.copy(activeChatPeerTyping = false) // stop typing on new message
                     } else {
                         state
@@ -449,16 +594,39 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
                     // 2. Decrypt text message with the AES key
                     val plainText = EncryptionManager.decryptWithAes(encryptedData, sessionAesKey, iv)
 
-                    // 3. Write decrypted message to Room
+                    // 3. Save file if present
+                    var localPath: String? = null
+                    var finalMsgText = plainText
+                    if (fileType != null && fileName != null) {
+                        try {
+                            val context = getApplication<Application>().applicationContext
+                            val localDir = File(context.filesDir, "received_files")
+                            if (!localDir.exists()) localDir.mkdirs()
+                            val localFile = File(localDir, "${System.currentTimeMillis()}_$fileName")
+                            
+                            val fileBytes = Base64.decode(plainText, Base64.DEFAULT)
+                            localFile.writeBytes(fileBytes)
+                            localPath = localFile.absolutePath
+                            finalMsgText = "[Attachment: $fileName]"
+                        } catch (ex: Exception) {
+                            Log.e("MessengerViewModel", "Failed to save received file bytes", ex)
+                        }
+                    }
+
+                    // 4. Write decrypted message to Room
                     val incomingMsg = ChatMessage(
-                        peerIp = peerIp,
+                        peerIp = ipToUse,
                         senderName = senderName,
-                        senderIp = peerIp,
-                        messageText = plainText,
+                        senderIp = ipToUse,
+                        messageText = finalMsgText,
                         encryptedData = encryptedData,
                         encryptedAesKey = encryptedAesKey,
                         iv = iv,
-                        isFromMe = false
+                        isFromMe = false,
+                        fileType = fileType,
+                        fileName = fileName,
+                        localFilePath = localPath,
+                        fileSize = fileSize
                     )
                     repository.insertMessage(incomingMsg)
                 } else {
@@ -466,17 +634,22 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             } catch (e: Exception) {
                 Log.e("MessengerViewModel", "Failed to decrypt incoming message", e)
+                val existing = findMatchingPeer(peerIp)
+                val ipToUse = existing?.ip ?: peerIp
                 // Write placeholder "Decryption Failed" error message
                 val incomingMsg = ChatMessage(
-                    peerIp = peerIp,
+                    peerIp = ipToUse,
                     senderName = senderName,
-                    senderIp = peerIp,
+                    senderIp = ipToUse,
                     messageText = "⚠️ Decryption Failed: Cipher is invalid or matching signature missing.",
                     encryptedData = encryptedData,
                     encryptedAesKey = encryptedAesKey,
                     iv = iv,
                     isFromMe = false,
-                    isSecure = false
+                    isSecure = false,
+                    fileType = fileType,
+                    fileName = fileName,
+                    fileSize = fileSize
                 )
                 repository.insertMessage(incomingMsg)
             }
@@ -484,11 +657,15 @@ class MessengerViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     override fun onTypingStateChanged(peerIp: String, isTyping: Boolean) {
-        _uiState.update { state ->
-            if (state.activeChatPeerIp == peerIp) {
-                state.copy(activeChatPeerTyping = isTyping)
-            } else {
-                state
+        viewModelScope.launch(Dispatchers.IO) {
+            val existing = findMatchingPeer(peerIp)
+            val ipToUse = existing?.ip ?: peerIp
+            _uiState.update { state ->
+                if (state.activeChatPeerIp == ipToUse) {
+                    state.copy(activeChatPeerTyping = isTyping)
+                } else {
+                    state
+                }
             }
         }
     }

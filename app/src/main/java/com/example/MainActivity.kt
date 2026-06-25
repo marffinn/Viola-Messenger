@@ -52,6 +52,13 @@ import com.example.viewmodel.MessengerUiState
 import com.example.viewmodel.MessengerViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.net.Uri
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import java.io.File
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -284,7 +291,7 @@ fun SidebarControlPanel(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "ADDR: ${uiState.ownIp}",
+                        text = "ADDR: ${uiState.ownIp}:${uiState.ownPort}",
                         style = TextStyle(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 13.sp,
@@ -526,9 +533,12 @@ fun SidebarControlPanel(
         }
     }
 
-    // Inline Dialog: Change Display Name
+    // Inline Dialog: Change Display Name & Listening Port
     if (showEditNameDialog) {
         var tempName by remember { mutableStateOf(uiState.ownName) }
+        var tempAvatar by remember { mutableStateOf(uiState.ownAvatar) }
+        var tempPort by remember { mutableStateOf(uiState.ownPort.toString()) }
+        var portError by remember { mutableStateOf<String?>(null) }
         AlertDialog(
             onDismissRequest = { showEditNameDialog = false },
             title = {
@@ -538,23 +548,122 @@ fun SidebarControlPanel(
                 )
             },
             text = {
-                OutlinedTextField(
-                    value = tempName,
-                    onValueChange = { tempName = it },
-                    label = { Text("Display Name") },
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = SleekAccent,
-                        unfocusedBorderColor = SleekBorder,
-                        focusedLabelColor = SleekAccent
-                    ),
-                    singleLine = true,
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxWidth()
-                )
+                ) {
+                    Text(
+                        text = "CHOOSE AVATAR",
+                        style = TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = SleekAccent
+                        )
+                    )
+                    
+                    val avatarOptions = listOf("👤", "🐱", "🐶", "🦊", "🦁", "🐨", "🐼", "🚀", "🤖", "🎨", "👾", "🦄", "🐧", "🦉")
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(SleekDark)
+                                .border(2.dp, SleekAccent, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(text = tempAvatar, fontSize = 24.sp)
+                        }
+                        
+                        Box(modifier = Modifier.height(24.dp).width(1.dp).background(SleekBorder))
+                        
+                        androidx.compose.foundation.lazy.LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            items(avatarOptions.size) { index ->
+                                val avatar = avatarOptions[index]
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(if (tempAvatar == avatar) SleekCard else Color.Transparent)
+                                        .border(
+                                            1.dp,
+                                            if (tempAvatar == avatar) SleekAccent else SleekBorder.copy(alpha = 0.5f),
+                                            CircleShape
+                                        )
+                                        .clickable { tempAvatar = avatar },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(text = avatar, fontSize = 18.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = tempName,
+                        onValueChange = { tempName = it },
+                        label = { Text("Display Name") },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = SleekAccent,
+                            unfocusedBorderColor = SleekBorder,
+                            focusedLabelColor = SleekAccent
+                        ),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = tempPort,
+                        onValueChange = { 
+                            tempPort = it
+                            val p = it.toIntOrNull()
+                            if (p == null || p !in 1024..65535) {
+                                portError = "Port must be between 1024 and 65535"
+                            } else {
+                                portError = null
+                            }
+                        },
+                        label = { Text("Listening Port") },
+                        isError = portError != null,
+                        supportingText = {
+                            if (portError != null) {
+                                Text(portError!!, color = Color.Red, fontSize = 11.sp)
+                            } else {
+                                Text("Port for receiving incoming connections", fontSize = 11.sp, color = SleekTextSecondary)
+                            }
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done
+                        ),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = SleekAccent,
+                            unfocusedBorderColor = SleekBorder,
+                            focusedLabelColor = SleekAccent
+                        ),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
+                    enabled = portError == null && tempName.isNotBlank() && tempPort.isNotBlank(),
                     onClick = {
                         viewModel.updateOwnName(tempName)
+                        viewModel.updateOwnAvatar(tempAvatar)
+                        val p = tempPort.toIntOrNull()
+                        if (p != null) {
+                            viewModel.updateOwnPort(p)
+                        }
                         showEditNameDialog = false
                     }
                 ) {
@@ -585,14 +694,14 @@ fun SidebarControlPanel(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
-                        text = "Enter the local subnet IP of another device running this app.",
+                        text = "Enter the local subnet IP, or public IP:PORT (e.g. 12.34.56.78:12120) of another device.",
                         style = TextStyle(fontSize = 12.sp, color = SleekTextSecondary)
                     )
                     OutlinedTextField(
                         value = ipInput,
                         onValueChange = { ipInput = it },
-                        label = { Text("Peer IP Address") },
-                        placeholder = { Text("e.g. 192.168.1.102") },
+                        label = { Text("Peer IP / Address & Port") },
+                        placeholder = { Text("e.g. 192.168.1.102 or 12.34.56.78:12120") },
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Phone,
                             imeAction = ImeAction.Next
@@ -678,14 +787,42 @@ fun PeerContactCard(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.weight(1f)
             ) {
-                // Online State Beacon
+                // Interactive Emoji Avatar Circle with Corner Online Beacon overlay
                 Box(
-                    modifier = Modifier
-                        .size(9.dp)
-                        .clip(CircleShape)
-                        .background(if (peer.isOnline) SleekAccent else Color.DarkGray)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                            .background(SleekDark)
+                            .border(1.dp, SleekBorder, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = peer.avatar,
+                            style = TextStyle(fontSize = 20.sp)
+                        )
+                    }
+                    // Corner Beacon Badge
+                    Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .align(Alignment.BottomEnd)
+                            .clip(CircleShape)
+                            .background(SleekDark)
+                            .padding(1.5.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(CircleShape)
+                                .background(if (peer.isOnline) SleekAccent else Color.Gray)
+                        )
+                    }
+                }
+                
+                Spacer(modifier = Modifier.width(12.dp))
                 
                 Column {
                     Text(
@@ -837,10 +974,22 @@ fun ChatWorkspace(
         }
     } else {
         // Active Chat screen
+        val context = LocalContext.current
         var messageTextInput by remember { mutableStateOf("") }
         val listState = rememberLazyListState()
         val scope = rememberCoroutineScope()
         
+        val filePickerLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.GetContent()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                val (fileName, fileSize) = getFileNameAndSize(context, uri)
+                val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                val fileType = if (mimeType.startsWith("image/")) "image" else "file"
+                viewModel.sendFileOrImage(uri, fileName, fileType, fileSize)
+            }
+        }
+
         // Auto-scroll to bottom of conversation
         LaunchedEffect(messages.size) {
             if (messages.isNotEmpty()) {
@@ -869,6 +1018,21 @@ fun ChatWorkspace(
                             )
                         }
                     }
+                    
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(SleekDark)
+                            .border(1.dp, SleekBorder, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = chatPeer.avatar,
+                            style = TextStyle(fontSize = 18.sp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
                     
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -989,6 +1153,24 @@ fun ChatWorkspace(
                     .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Secure Attachment Button
+                IconButton(
+                    onClick = { filePickerLauncher.launch("*/*") },
+                    modifier = Modifier
+                        .padding(end = 8.dp)
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(SleekCard)
+                        .border(1.dp, SleekBorder, CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Attach File or Picture",
+                        tint = SleekAccent,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
                 OutlinedTextField(
                     value = messageTextInput,
                     onValueChange = {
@@ -1121,6 +1303,103 @@ fun ChatMessageBubble(msg: ChatMessage) {
                 .padding(horizontal = 16.dp, vertical = 10.dp)
         ) {
             Column {
+                if (msg.fileType == "image" && msg.localFilePath != null) {
+                    val bitmap = remember(msg.localFilePath) {
+                        try {
+                            BitmapFactory.decodeFile(msg.localFilePath)
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = msg.fileName ?: "Image Attachment",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 240.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .border(1.dp, SleekBorder, RoundedCornerShape(8.dp))
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                    } else {
+                        Text(
+                            text = "⚠️ Picture data encrypted securely.",
+                            style = TextStyle(fontSize = 13.sp, color = if (msg.isFromMe) SleekContrastText else SleekAccent)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                } else if (msg.fileType == "file" && msg.localFilePath != null) {
+                    val context = LocalContext.current
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SleekDark),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .border(1.dp, SleekBorder, RoundedCornerShape(8.dp))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = msg.fileName ?: "File Attachment",
+                                    style = TextStyle(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = SleekAccent
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Size: ${formatFileSize(msg.fileSize)}",
+                                    style = TextStyle(
+                                        fontSize = 11.sp,
+                                        color = SleekTextSecondary
+                                    )
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    val srcFile = File(msg.localFilePath)
+                                    if (srcFile.exists()) {
+                                        try {
+                                            val dstFile = File(
+                                                context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS),
+                                                msg.fileName ?: "downloaded_file"
+                                            )
+                                            srcFile.inputStream().use { input ->
+                                                dstFile.outputStream().use { output ->
+                                                    input.copyTo(output)
+                                                }
+                                            }
+                                            Toast.makeText(context, "Saved to Downloads: ${dstFile.name}", Toast.LENGTH_SHORT).show()
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Export failed", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        Toast.makeText(context, "File does not exist locally", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Export File",
+                                    tint = SleekAccent
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
                 Text(
                     text = msg.messageText,
                     style = TextStyle(
@@ -1264,4 +1543,38 @@ fun TypingAnimationDots() {
         Spacer(modifier = Modifier.width(3.dp))
         Box(modifier = Modifier.size(4.dp).clip(CircleShape).background(SleekAccent.copy(alpha = dot3)))
     }
+}
+
+fun getFileNameAndSize(context: Context, uri: Uri): Pair<String, Long> {
+    var name = "unknown"
+    var size = 0L
+    try {
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (nameIndex != -1) {
+                    name = it.getString(nameIndex)
+                }
+                val sizeIndex = it.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                if (sizeIndex != -1) {
+                    size = it.getLong(sizeIndex)
+                }
+            }
+        }
+    } catch (e: Exception) {
+        android.util.Log.e("MainActivity", "Error querying OpenableColumns", e)
+    }
+    if (name == "unknown") {
+        name = uri.path?.substringAfterLast('/') ?: "file"
+    }
+    return Pair(name, size)
+}
+
+fun formatFileSize(size: Long): String {
+    if (size <= 0) return "0 B"
+    val units = arrayOf("B", "KB", "MB", "GB")
+    val digitGroups = (Math.log10(size.toDouble()) / Math.log10(1024.0)).toInt()
+    if (digitGroups !in units.indices) return "$size B"
+    return String.format(java.util.Locale.US, "%.1f %s", size / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
 }
